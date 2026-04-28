@@ -1,0 +1,37 @@
+Metric,PID,LQR
+Sampling Time Ts (s),0.100,0.100
+Trial duration (s),68.20,65.40
+Number of samples N,682,655
+Setpoint (deg),48.74,39.65
+— Common regulation window (controller alone) —,,
+MSE  (deg²),7.5029,1.3853
+RMSE (deg),2.7391,1.1770
+MAE  (deg),2.6560,0.9708
+Std deviation of error (deg),0.6795,1.1932
+Max |error| (deg),3.910,2.720
+IAE  (deg·s),9.296,3.495
+ITAE (deg·s²),15.954,7.602
+Mean PWM (μs counts),696.46,695.36
+Std PWM (μs counts),20.25,0.68
+PWM smoothness  Δu/Δt (counts/s),185.00,1.14
+— Full trial (with disturbances) —,,
+MSE  (deg²),35.0942,72.0097
+RMSE (deg),5.9240,8.4859
+MAE  (deg),4.5946,4.7085
+Std deviation of error (deg),3.9940,8.1933
+Max |error| (deg),25.45,42.31
+IAE  (deg·s),313.36,308.41
+Mean PWM,696.09,700.09
+Std PWM,42.34,17.48
+PWM smoothness Δu/Δt (counts/s),219.05,20.00
+— Late-trial steady regulation —,,
+σ(e)  (deg),0.322,0.692
+Max |e|  (deg),4.26,2.02
+σ(PWM),10.46,0.20
+— Initial response —,,
+Initial deviation from setpoint (deg),3.91,0.33
+Time first within ±2° (s),0.50,0.00
+— Disturbance episodes (|e|>5°) —,,
+Number of episodes,3,4
+Mean recovery to ±10% peak (s),9.30,1.42
+Max recovery (s),9.30,1.80
