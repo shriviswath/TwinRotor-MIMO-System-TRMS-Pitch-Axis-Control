@@ -46,7 +46,7 @@ LQR showed:
   - TRMS Hardware Data
   - TRMS_Project_Documnetation
   - Theoretical Transfer Func (Pitch&Yaw)
-  - Transfer Fucntion (OLD Report-2017)
+  - Transfer Function (OLD Report-2017)
 
 ### 📄 Main File
 - `README.md` – Project documentation and overview
