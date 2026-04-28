@@ -1,0 +1,396 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include <math.h>
+#include "inc/hw_memmap.h"
+#include "inc/hw_types.h"
+#include "inc/hw_gpio.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "driverlib/pwm.h"
+#include "driverlib/pin_map.h"
+#include "driverlib/uart.h"
+#include "driverlib/i2c.h"
+#include "driverlib/fpu.h"
+#include "uartstdio.h"
+
+// ── PWM Timing ─────────────────────────────────────────────
+#define PWM_PERIOD   12500
+#define ESC_MIN      625      // 1.0 ms  – absolute floor / arming signal
+#define ESC_IDLE     620      // 1.36 ms – minimum running speed
+#define ESC_MAX      1250     // 2.0 ms  – full throttle
+
+// ── IMU ────────────────────────────────────────────────────
+#define MPU_ADDR     0x68
+#define ACCEL_SCALE  16384.0f
+#define GYRO_SCALE   131.0f
+#define DT           0.01f    // 10 ms loop
+#define COMP_ALPHA   0.98f
+#define IMU_SETTLE_MS 5000
+
+// ── Globals ────────────────────────────────────────────────
+static float gyro_bias_x = 0.0f;   // pitch-axis gyro offset
+static float gyro_bias_z = 0.0f;   // yaw-axis gyro offset
+static float g_pitch     = 0.0f;
+static float g_yaw       = 0.0f;
+
+static uint32_t pwm_m1   = ESC_IDLE;
+static uint32_t pwm_m2   = ESC_IDLE;
+static uint32_t cmd_step = 5;       // default step size
+
+
+// ============================================================
+//  Helpers
+// ============================================================
+static void delay_ms(uint32_t ms)
+{
+    SysCtlDelay((SysCtlClockGet() / 3000) * ms);
+}
+
+static void printFloat(const char *label, float v)
+{
+    int32_t a = (int32_t)v;
+    int32_t b = (int32_t)((v - (float)a) * 100.0f);
+    if (b < 0) b = -b;
+    UARTprintf("%s%d.%02d", label, a, b);
+}
+
+static uint32_t clampPWM(int32_t v)
+{
+    if (v < (int32_t)ESC_IDLE) return ESC_IDLE;
+    if (v > (int32_t)ESC_MAX)  return ESC_MAX;
+    return (uint32_t)v;
+}
+
+
+// ============================================================
+//  I2C – same burst protocol as working code
+// ============================================================
+static void I2C_Write(uint8_t reg, uint8_t data)
+{
+    I2CMasterSlaveAddrSet(I2C0_BASE, MPU_ADDR, false);
+    I2CMasterDataPut(I2C0_BASE, reg);
+    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_START);
+    while (I2CMasterBusy(I2C0_BASE));
+    I2CMasterDataPut(I2C0_BASE, data);
+    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_FINISH);
+    while (I2CMasterBusy(I2C0_BASE));
+}
+
+static void I2C_Read(uint8_t reg, uint8_t *buf, uint8_t len)
+{
+    I2CMasterSlaveAddrSet(I2C0_BASE, MPU_ADDR, false);
+    I2CMasterDataPut(I2C0_BASE, reg);
+    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_SINGLE_SEND);
+    while (I2CMasterBusy(I2C0_BASE));
+
+    I2CMasterSlaveAddrSet(I2C0_BASE, MPU_ADDR, true);
+    int i;
+    for (i = 0; i < len; i++)
+    {
+        if      (len == 1)      I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_SINGLE_RECEIVE);
+        else if (i == 0)        I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_RECEIVE_START);
+        else if (i == len - 1)  I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_RECEIVE_FINISH);
+        else                    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_RECEIVE_CONT);
+        while (I2CMasterBusy(I2C0_BASE));
+        buf[i] = I2CMasterDataGet(I2C0_BASE);
+    }
+}
+
+
+// ============================================================
+//  IMU – reads pitch (complementary) + yaw (gyro integration)
+// ============================================================
+static void updateAngles(void)
+{
+    uint8_t buf[6];
+
+    // ── Accelerometer (0x3B, 6 bytes: AX AY AZ) ─────────
+    I2C_Read(0x3B, buf, 6);
+    float ay = (float)((int16_t)((buf[2] << 8) | buf[3])) / ACCEL_SCALE;
+    float az = (float)((int16_t)((buf[4] << 8) | buf[5])) / ACCEL_SCALE;
+
+    // ── Gyroscope (0x43, 6 bytes: GX GY GZ) ─────────────
+    I2C_Read(0x43, buf, 6);
+    float gx = (float)((int16_t)((buf[0] << 8) | buf[1])) / GYRO_SCALE - gyro_bias_x;
+    float gz = (float)((int16_t)((buf[4] << 8) | buf[5])) / GYRO_SCALE - gyro_bias_z;
+
+    // ── Pitch: complementary filter ──────────────────────
+    float accel_angle = (180.0f / 3.14159265f) * (atan2f(ay, az) + 3.14159265f);
+    if (accel_angle > 180.0f) accel_angle -= 360.0f;
+    g_pitch = COMP_ALPHA * (g_pitch + gx * DT) + (1.0f - COMP_ALPHA) * accel_angle;
+
+    // ── Yaw: gyro integration (relative, no drift correction)
+    g_yaw += gz * DT;
+}
+
+
+// ============================================================
+//  Gyro Calibration – captures both X and Z bias at rest
+// ============================================================
+static void calibrateGyro(void)
+{
+    UARTprintf("Calibrating gyro -- keep beam STILL...\n");
+    delay_ms(2000);
+
+    float sum_x = 0.0f, sum_z = 0.0f;
+    uint8_t buf[6];
+    int i;
+    for (i = 0; i < 500; i++)
+    {
+        I2C_Read(0x43, buf, 6);
+        sum_x += (float)((int16_t)((buf[0] << 8) | buf[1])) / GYRO_SCALE;
+        sum_z += (float)((int16_t)((buf[4] << 8) | buf[5])) / GYRO_SCALE;
+        delay_ms(4);
+    }
+    gyro_bias_x = sum_x / 500.0f;
+    gyro_bias_z = sum_z / 500.0f;
+
+    printFloat("  Bias_X=", gyro_bias_x);
+    printFloat("  Bias_Z=", gyro_bias_z);
+    UARTprintf(" deg/s\n\n");
+}
+
+
+// ============================================================
+//  Print current state
+// ============================================================
+static void printState(void)
+{
+    printFloat("Pitch=", g_pitch);
+    printFloat("  Yaw=", g_yaw);
+    UARTprintf("  M1=%d  M2=%d  Step=%d\n",
+               (int)pwm_m1, (int)pwm_m2, (int)cmd_step);
+}
+
+
+// ============================================================
+//  Apply PWM to hardware
+// ============================================================
+static void applyPWM(void)
+{
+    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_0, pwm_m1);
+    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_1, pwm_m2);
+}
+
+
+// ============================================================
+//  Emergency Stop – ramps down, then halts forever
+// ============================================================
+static void emergencyStop(void)
+{
+    uint32_t cur = pwm_m1 > pwm_m2 ? pwm_m1 : pwm_m2;
+    while (cur > ESC_MIN)
+    {
+        if (cur < 3) break;
+        cur -= 2;
+        PWMPulseWidthSet(PWM0_BASE, PWM_OUT_0, cur);
+        PWMPulseWidthSet(PWM0_BASE, PWM_OUT_1, cur);
+        delay_ms(5);
+    }
+    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3, GPIO_PIN_1);
+    UARTprintf("\n!!! EMERGENCY STOP !!!\n");
+    while (1);
+}
+
+
+// ============================================================
+//  MAIN
+// ============================================================
+int main(void)
+{
+    FPUEnable();
+    FPULazyStackingEnable();
+
+    // ── System & PWM clocks ──────────────────────────────
+    SysCtlClockSet(SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL |
+                   SYSCTL_OSC_MAIN | SYSCTL_XTAL_16MHZ);
+    SysCtlPWMClockSet(SYSCTL_PWMDIV_64);
+
+    // ── Peripheral enables ───────────────────────────────
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_I2C0);
+
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOA));
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOB));
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOF));
+
+    // ── Unlock PF0 (SW2) ─────────────────────────────────
+    HWREG(GPIO_PORTF_BASE + GPIO_O_LOCK) = GPIO_LOCK_KEY;
+    HWREG(GPIO_PORTF_BASE + GPIO_O_CR)  |= GPIO_PIN_0;
+    HWREG(GPIO_PORTF_BASE + GPIO_O_LOCK) = 0x00;
+
+    // ── UART ─────────────────────────────────────────────
+    GPIOPinConfigure(GPIO_PA0_U0RX);
+    GPIOPinConfigure(GPIO_PA1_U0TX);
+    GPIOPinTypeUART(GPIO_PORTA_BASE, GPIO_PIN_0 | GPIO_PIN_1);
+    UARTStdioConfig(0, 115200, SysCtlClockGet());
+
+    // ── LEDs & Buttons ───────────────────────────────────
+    GPIOPinTypeGPIOOutput(GPIO_PORTF_BASE, GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3);
+    GPIOPinTypeGPIOInput(GPIO_PORTF_BASE, GPIO_PIN_4 | GPIO_PIN_0);
+    GPIOPadConfigSet(GPIO_PORTF_BASE, GPIO_PIN_4,
+                     GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
+    GPIOPadConfigSet(GPIO_PORTF_BASE, GPIO_PIN_0,
+                     GPIO_STRENGTH_2MA, GPIO_PIN_TYPE_STD_WPU);
+
+    // ── I2C ──────────────────────────────────────────────
+    GPIOPinConfigure(GPIO_PB2_I2C0SCL);
+    GPIOPinConfigure(GPIO_PB3_I2C0SDA);
+    GPIOPinTypeI2CSCL(GPIO_PORTB_BASE, GPIO_PIN_2);
+    GPIOPinTypeI2C(GPIO_PORTB_BASE, GPIO_PIN_3);
+    I2CMasterInitExpClk(I2C0_BASE, SysCtlClockGet(), false);
+
+    // ── Wake MPU6050 ─────────────────────────────────────
+    I2C_Write(0x6B, 0x00);   // Power management – wake
+    I2C_Write(0x1B, 0x00);   // Gyro  FS = ±250 deg/s
+    I2C_Write(0x1C, 0x00);   // Accel FS = ±2 g
+    delay_ms(100);
+
+    // ── PWM on PB6 (M1) and PB7 (M2) ────────────────────
+    GPIOPinConfigure(GPIO_PB6_M0PWM0);
+    GPIOPinConfigure(GPIO_PB7_M0PWM1);
+    GPIOPinTypePWM(GPIO_PORTB_BASE, GPIO_PIN_6 | GPIO_PIN_7);
+    PWMGenConfigure(PWM0_BASE, PWM_GEN_0,
+                    PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);
+    PWMGenPeriodSet(PWM0_BASE, PWM_GEN_0, PWM_PERIOD);
+
+    // Send MIN signal FIRST – required before powering ESCs
+    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_0, ESC_MIN);
+    PWMPulseWidthSet(PWM0_BASE, PWM_OUT_1, ESC_MIN);
+    PWMOutputState(PWM0_BASE, PWM_OUT_0_BIT | PWM_OUT_1_BIT, true);
+    PWMGenEnable(PWM0_BASE, PWM_GEN_0);
+
+    // ── Banner ───────────────────────────────────────────
+    UARTprintf("\n========================================\n");
+    UARTprintf("  TRMS  –  MANUAL PWM CONTROL + LOGGER\n");
+    UARTprintf("========================================\n\n");
+
+    // ── WHO_AM_I check (accepts 0x68 standard + 0x70 clone)
+    uint8_t who;
+    I2C_Read(0x75, &who, 1);
+    if (who == 0x68 || who == 0x70)
+        UARTprintf("MPU6050 OK (0x%02X)\n\n", (unsigned)who);
+    else
+    {
+        UARTprintf("MPU6050 FAIL (got 0x%02X) -- check wiring\n",
+                   (unsigned)who);
+        while (1);
+    }
+
+    // ── STEP 1: IMU settle ───────────────────────────────
+    UARTprintf("IMU settling (%d s) – DO NOT TOUCH\n\n",
+               IMU_SETTLE_MS / 1000);
+    uint32_t settle_loops = IMU_SETTLE_MS / 10;
+    uint32_t sl;
+    for (sl = 0; sl < settle_loops; sl++)
+    {
+        updateAngles();
+        if (sl % 100 == 0)
+            UARTprintf("  %d s remaining\n",
+                       (int)((settle_loops - sl) / 100));
+        delay_ms(10);
+    }
+
+    // ── STEP 2: Gyro calibration ─────────────────────────
+    calibrateGyro();
+
+    // Reset yaw to 0 after calibration
+    g_yaw = 0.0f;
+
+    // ── STEP 3: Arm ESCs ─────────────────────────────────
+    // ESC_MIN already being sent since boot.
+    // User powers battery now, hears calibration beeps, then presses SW1.
+    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2); // Blue LED
+    UARTprintf("Connect battery – hear beeps – then press SW1\n");
+    while (GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_4) != 0); // Wait SW1
+    delay_ms(300);
+    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, 0);
+    UARTprintf("Armed.\n\n");
+
+    // ── STEP 4: Soft ramp to idle ────────────────────────
+    UARTprintf("Ramping to idle...\n");
+    uint32_t r;
+    for (r = ESC_MIN; r <= ESC_IDLE; r++)
+    {
+        PWMPulseWidthSet(PWM0_BASE, PWM_OUT_0, r);
+        PWMPulseWidthSet(PWM0_BASE, PWM_OUT_1, r);
+        delay_ms(3);
+    }
+    pwm_m1 = pwm_m2 = ESC_IDLE;
+
+    GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3); // Green LED
+    UARTprintf("At IDLE (%d). Manual control active.\n\n", ESC_IDLE);
+    UARTprintf("Commands: u/d=both  q/a=M1  w/s=M2\n");
+    UARTprintf("          1-9=step  0=step10  r=reset  p=print\n");
+    UARTprintf("SW2 = EMERGENCY STOP\n\n");
+    printState();
+
+    // ── MAIN LOOP ────────────────────────────────────────
+    uint32_t print_count = 0;
+
+    while (1)
+    {
+        // ── 1. Update IMU ─────────────────────────────
+        updateAngles();
+
+        // ── 2. Handle UART commands (non-blocking) ────
+        // Reads directly from UART FIFO so it never stalls the loop
+        if (UARTCharsAvail(UART0_BASE))
+        {
+            char c = (char)UARTCharGet(UART0_BASE);
+
+            if      (c == 'u') { pwm_m1 = clampPWM((int32_t)pwm_m1 + (int32_t)cmd_step);
+                                  pwm_m2 = clampPWM((int32_t)pwm_m2 + (int32_t)cmd_step); }
+            else if (c == 'd') { pwm_m1 = clampPWM((int32_t)pwm_m1 - (int32_t)cmd_step);
+                                  pwm_m2 = clampPWM((int32_t)pwm_m2 - (int32_t)cmd_step); }
+
+            else if (c == 'q') { pwm_m1 = clampPWM((int32_t)pwm_m1 + (int32_t)cmd_step); }
+            else if (c == 'a') { pwm_m1 = clampPWM((int32_t)pwm_m1 - (int32_t)cmd_step); }
+
+            else if (c == 'w') { pwm_m2 = clampPWM((int32_t)pwm_m2 + (int32_t)cmd_step); }
+            else if (c == 's') { pwm_m2 = clampPWM((int32_t)pwm_m2 - (int32_t)cmd_step); }
+
+            else if (c == 'r') { pwm_m1 = pwm_m2 = ESC_IDLE;
+                                  UARTprintf("Reset to IDLE.\n"); }
+
+            else if (c >= '1' && c <= '9') { cmd_step = (uint32_t)(c - '0');
+                                              UARTprintf("Step=%d\n", (int)cmd_step); }
+            else if (c == '0')             { cmd_step = 10;
+                                              UARTprintf("Step=10\n"); }
+
+            else if (c == 'p') { printState(); }
+
+            // Apply immediately on any change
+            applyPWM();
+        }
+
+        // ── 3. LED feedback ───────────────────────────
+        float ep = g_pitch;
+        if      (ep < 0.0f) ep = -ep;  // abs
+
+        if      (ep < 2.0f)  GPIOPinWrite(GPIO_PORTF_BASE,
+                                  GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, GPIO_PIN_3); // Green
+        else if (ep < 10.0f) GPIOPinWrite(GPIO_PORTF_BASE,
+                                  GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, GPIO_PIN_2); // Blue
+        else                 GPIOPinWrite(GPIO_PORTF_BASE,
+                                  GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, GPIO_PIN_1); // Red
+
+        // ── 4. Auto-print telemetry every 500 ms ──────
+        print_count++;
+        if (print_count >= 50)   // 50 × 10 ms = 500 ms
+        {
+            print_count = 0;
+            printState();
+        }
+
+        // ── 5. Emergency stop (SW2) ───────────────────
+        if (GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_0) == 0)
+            emergencyStop();
+
+        delay_ms(10);
+    }
+}
