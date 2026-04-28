@@ -2,20 +2,21 @@
 Twin Rotor MIMO System (TRMS) project focused on pitch-axis control using PID and LQR algorithms. Implemented in C language on the Tiva C Series TM4C123GXL LaunchPad using Code Composer Studio. Performance was analyzed by comparing tracking accuracy, stability, and response, where LQR showed better control than PID.
 
 ## 📌 Overview
-This project focuses on controlling the **pitch axis** of a Twin Rotor MIMO System (TRMS) using **PID** and **LQR** control algorithms.  
-The system was implemented in **C language** on the Tiva C Series TM4C123GXL LaunchPad using :contentReference[oaicite:1]{index=1}.
+This project focuses on controlling the **Pitch Axis** of a Twin Rotor MIMO System (TRMS) using **PID** and **LQR** control algorithms.  
+The system was implemented in **C language** on the Tiva C Series TM4C123GXL LaunchPad.
 
 ## ⚙️ Hardware Used
 - Tiva C Series TM4C123GXL LaunchPad  
 - MPU6050 IMU Sensor  
-- ESC + BLDC Motors  
+- SimonK ESC (30A) + BLDC Motors  
 - TRMS Mechanical Setup  
-- Power Supply / Battery  
+- 3S LiPo Battery  
 
-## 💻 Software Used
-- :contentReference[oaicite:3]{index=3}  
+## 💻 Software Used  
 - Embedded C Language  
-- TivaWare Driver Library  
+- TivaWare Driver Library
+- Code Composer Studio 12.8.1
+- VS Code 
 
 ## 🚀 Features
 - Real-time pitch angle sensing using MPU6050  
