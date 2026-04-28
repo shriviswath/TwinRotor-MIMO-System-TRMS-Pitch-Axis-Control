@@ -34,9 +34,22 @@ LQR showed:
 - Improved tracking accuracy  
 
 ## 📂 Repository Contents
-- `PID_Code.c` – Pitch control using PID  
-- `LQR_Code.c` – Pitch control using LQR  
-- `README.md` – Project documentation  
+
+### 📁 Code
+- `LQR_Code` – C program for pitch control using Linear Quadratic Regulator (LQR)
+- `PID_Code` – C program for pitch control using Proportional Integral Derivative (PID)
+- `PWM Calculator With IMU` – PWM control and IMU sensor integration utility code
+
+### 📁 Resources
+- `TRMS Response Graph/` – Experimental graphs, response plots, and controller performance comparison
+  - STRUCTURAL AND MATERIAL ANALYSIS OF TRMS
+  - TRMS Hardware Data
+  - TRMS_Project_Documnetation
+  - Theoretical Transfer Func (Pitch&Yaw)
+  - Transfer Fucntion (OLD Report-2017)
+
+### 📄 Main File
+- `README.md` – Project documentation and overview
 
 ## 🎯 Future Scope
 - Add yaw axis control  
