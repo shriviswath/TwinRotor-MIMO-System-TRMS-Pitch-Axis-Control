@@ -41,7 +41,7 @@ LQR showed:
 - `PWM Calculator With IMU` – PWM control and IMU sensor integration utility code
 
 ### 📁 Resources
-- `TRMS Response Graph/` – Experimental graphs, response plots, and controller performance comparison
+  - TRMS Response Graph – Experimental graphs, response plots, and controller performance comparison
   - STRUCTURAL AND MATERIAL ANALYSIS OF TRMS
   - TRMS Hardware Data
   - TRMS_Project_Documnetation
