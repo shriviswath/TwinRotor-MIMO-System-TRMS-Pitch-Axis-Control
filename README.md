@@ -45,4 +45,4 @@ LQR showed:
 - Real-time GUI monitoring  
 
 ## 👨‍💻 Author
-[Your Name]
+Shri Viswath C K
