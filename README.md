@@ -64,3 +64,12 @@ LQR showed:
 
 ## 👨‍💻 Author
 Shri Viswath C K
+
+
+Reference Video Output:
+
+
+
+https://github.com/user-attachments/assets/1eec3415-6f89-4cee-8fbb-2949557dd089
+
+
