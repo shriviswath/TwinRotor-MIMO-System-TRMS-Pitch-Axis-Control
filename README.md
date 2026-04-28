@@ -49,6 +49,10 @@ LQR showed:
   - Theoretical Transfer Func (Pitch&Yaw)
   - Transfer Function (OLD Report-2017)
 
+### 📁 Sample Data Output
+- `LQR Output` 
+- `PID Output` 
+
 ### 📄 Main File
 - `README.md` – Project documentation and overview
 
