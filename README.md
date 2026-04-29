@@ -45,6 +45,7 @@ LQR showed:
   - TRMS Response Graph – Experimental graphs, response plots, and controller performance comparison
   - STRUCTURAL AND MATERIAL ANALYSIS OF TRMS
   - TRMS Hardware Data
+  - TRMS Report 2016
   - TRMS_Project_Documnetation
   - Theoretical Transfer Func (Pitch&Yaw)
   - Transfer Function (OLD Report-2017)
